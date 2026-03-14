@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{collections::HashMap, fmt};
 use std::fs::File;
 use std::io::Read;
 use std::iter::Peekable;
@@ -6,6 +6,8 @@ use std::path::Path;
 use std::str::Chars;
 
 use anyhow::{Result, bail};
+use pyo3::types::{PyAny, PyDict, PyDictMethods, PyList};
+use pyo3::{IntoPyObject, Bound, PyErr, BoundObject};
 
 #[derive(Debug)]
 pub enum Token {
@@ -23,14 +25,42 @@ pub enum Token {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub enum JsonValue {
     String(String),
     Number(f64),
-    Object(Vec<(String, JsonValue)>),
+    Object(HashMap<String, JsonValue>),
     Array(Vec<JsonValue>),
     Boolean(bool),
-    Null,
+    Null(),
+}
+
+impl<'py> IntoPyObject<'py> for JsonValue {
+    type Target = PyAny;
+    type Output = Bound<'py, PyAny>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: pyo3::Python<'py>) -> std::result::Result<Self::Output, Self::Error> {
+        match self {
+            JsonValue::String(s) => Ok(s.into_pyobject(py)?.into_any()),
+            JsonValue::Number(n) => Ok(n.into_pyobject(py)?.into_any()),
+            JsonValue::Boolean(b) => Ok(b.into_pyobject(py)?.into_bound().into_any()),
+            JsonValue::Null() => Ok(py.None().into_bound(py)),
+            JsonValue::Array(vec) => {
+                let items: std::result::Result<Vec<_>, _> = vec
+                    .into_iter()
+                    .map(|v| v.into_pyobject(py))
+                    .collect();
+                Ok(PyList::new(py, items?)?.into_any())
+            }
+            JsonValue::Object(map) => {
+                let pydict = PyDict::new(py);
+                for (k, v) in map {
+                    pydict.set_item(k, v.into_pyobject(py)?)?;
+                }
+                Ok(pydict.into_any())
+            }
+        }
+    }
 }
 
 const MAX_DEPTH: usize = 19;
@@ -316,7 +346,7 @@ fn parse_object<I>(tokens: &mut Peekable<I>, depth: usize) -> Result<JsonValue>
 where
     I: Iterator<Item = Token>,
 {
-    let mut object: Vec<_> = Vec::new();
+    let mut object: HashMap<String, JsonValue> = HashMap::new();
     // Consume the `{`
     tokens.next();
 
@@ -350,7 +380,7 @@ where
                 
                 // Parse value
                 let value = parse_value(tokens, depth)?;
-                object.push((key, value));
+                object.insert(key, value);
                 
                 // Check for comma or closing brace
                 match tokens.peek() {
@@ -456,7 +486,7 @@ where
             }
             Token::Null => {
                 tokens.next();
-                Ok(JsonValue::Null)
+                Ok(JsonValue::Null())
             }
             _ => bail!("Unknown Token detected"),
         }
